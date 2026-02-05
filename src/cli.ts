@@ -316,6 +316,14 @@ async function cmdPinClaim(): Promise<void> {
 
     if (result.success) {
       console.log("\n✅ " + result.message);
+      if (result.bridgeResult?.txHash) {
+        const status = result.bridgeResult.txStatus === "success" ? "✓ confirmed" :
+                       result.bridgeResult.txStatus === "reverted" ? "✗ reverted" : "⏳ pending";
+        console.log(`📜 TX: ${result.bridgeResult.txHash.slice(0, 20)}... [${status}]`);
+        if (result.bridgeResult.explorerUrl) {
+          console.log(`🔗 ${result.bridgeResult.explorerUrl}`);
+        }
+      }
       console.log("🎉 PIN wallet claimed successfully!");
     } else {
       console.log("\n⚠️ " + result.message);
