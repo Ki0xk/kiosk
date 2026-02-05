@@ -226,6 +226,13 @@ export async function depositToSession(
     if (session.channelId) {
       const clearNode = getClearNode();
 
+      // Authenticate if needed (each CLI call is a fresh process)
+      if (!clearNode.isAuthenticated) {
+        await clearNode.connect();
+        await clearNode.getConfig();
+        await clearNode.authenticate();
+      }
+
       // Convert to micro units (6 decimals for USDC)
       const microAmount = BigInt(Math.floor(depositAmount * 1_000_000));
 
@@ -330,6 +337,13 @@ export async function endSession(
     // Step 1: Close the Yellow channel (on-chain settlement)
     if (session.channelId) {
       const clearNode = getClearNode();
+
+      // Authenticate if needed (each CLI call is a fresh process)
+      if (!clearNode.isAuthenticated) {
+        await clearNode.connect();
+        await clearNode.getConfig();
+        await clearNode.authenticate();
+      }
 
       logger.info("Closing Yellow channel...", {
         sessionId,
@@ -446,6 +460,13 @@ export async function sessionToPin(sessionId: string): Promise<SessionPinResult>
     // Step 1: Close the Yellow channel
     if (session.channelId) {
       const clearNode = getClearNode();
+
+      // Authenticate if needed (each CLI call is a fresh process)
+      if (!clearNode.isAuthenticated) {
+        await clearNode.connect();
+        await clearNode.getConfig();
+        await clearNode.authenticate();
+      }
 
       logger.info("Closing Yellow channel...", {
         sessionId,
