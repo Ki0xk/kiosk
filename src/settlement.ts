@@ -214,14 +214,21 @@ export async function settleToChain(
       feeRecipient
     );
 
-    // Step 5: Close Yellow channel
+    // Step 5: Close Yellow channel (best effort - may already be closed)
     if (channelId) {
-      logger.info("Closing Yellow channel...");
-      await clearNode.closeChannel(channelId, kioskAddress);
-      logger.info("Channel closed");
+      try {
+        logger.info("Closing Yellow channel...");
+        await clearNode.closeChannel(channelId, kioskAddress);
+        logger.info("Channel closed");
+      } catch (closeError) {
+        // Channel may have auto-closed or expired - this is OK if bridge succeeded
+        logger.warn("Channel close failed (may have auto-closed)", {
+          error: closeError instanceof Error ? closeError.message : closeError
+        });
+      }
     }
 
-    // Step 6: Update PIN status based on result
+    // Step 6: Update PIN status based on BRIDGE result (not channel close)
     if (bridgeResult.success) {
       pinWallet.status = "SETTLED";
       pinWallet.bridgeTxHash = bridgeResult.txHash;
