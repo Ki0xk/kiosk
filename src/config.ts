@@ -25,6 +25,12 @@ const envSchema = z.object({
     .regex(/^0x[a-fA-F0-9]{40}$/, "Invalid address format")
     .default("0x036CbD53842c5426634e7929541eC2318f3dCF7e"),
 
+  // Arc Bridge
+  FEE_RECIPIENT_ADDRESS: z
+    .string()
+    .regex(/^0x[a-fA-F0-9]{40}$/, "Invalid address format")
+    .optional(),
+
   // App
   MOCK_MODE: z
     .string()

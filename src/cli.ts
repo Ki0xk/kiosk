@@ -3,9 +3,10 @@
  * Ki0xk CLI - Terminal testing tool for the kiosk ATM
  *
  * Commands:
- *   npm run cli balance     - Check unified balance
+ *   npm run cli balances    - Show Yellow + Arc balances
+ *   npm run cli settle      - Settle USDC to user's chain
+ *   npm run cli bridge      - Direct bridge without Yellow
  *   npm run cli resolve     - Resolve ENS name to address
- *   npm run cli send        - Send ytest.usd to address
  *   npm run cli pin-create  - Create a PIN-protected deposit
  *   npm run cli pin-claim   - Claim funds with PIN
  */
@@ -13,13 +14,25 @@
 import { createPublicClient, http, isAddress } from "viem";
 import { mainnet } from "viem/chains";
 import { normalize } from "viem/ens";
-import * as crypto from "crypto";
-import * as fs from "fs";
 import * as readline from "readline";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { initWallet, kioskAddress } from "./wallet.js";
 import { getClearNode } from "./clearnode.js";
+import {
+  getKioskBalances,
+  formatBalances,
+  settleToChain,
+  createPinWallet,
+  claimPinWallet,
+  loadPinWallets,
+  savePinWallets,
+  retryPendingBridges,
+  getPendingWalletsSummary,
+} from "./settlement.js";
+import { bridgeToChain, getArcBalance } from "./arc/bridge.js";
+import { calculateFee, formatFeeBreakdown } from "./arc/fees.js";
+import { SUPPORTED_CHAINS, CHAIN_OPTIONS, formatChainList, getChainByKey } from "./arc/chains.js";
 
 // ENS resolution client (uses mainnet for ENS)
 const ensClient = createPublicClient({
@@ -27,45 +40,9 @@ const ensClient = createPublicClient({
   transport: http("https://eth.llamarpc.com"),
 });
 
-// Simple PIN wallet storage (in production, use a proper database)
-const PIN_WALLET_FILE = "./pin-wallets.json";
-
-interface PinWallet {
-  id: string;
-  pinHash: string;
-  amount: string;
-  createdAt: number;
-  claimed: boolean;
-  claimedAt?: number;
-  claimedTo?: string;
-}
-
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-function hashPin(pin: string): string {
-  return crypto.createHash("sha256").update(pin).digest("hex");
-}
-
-function generatePinWalletId(): string {
-  return crypto.randomBytes(4).toString("hex").toUpperCase();
-}
-
-function loadPinWallets(): PinWallet[] {
-  try {
-    if (fs.existsSync(PIN_WALLET_FILE)) {
-      return JSON.parse(fs.readFileSync(PIN_WALLET_FILE, "utf-8"));
-    }
-  } catch {
-    // Ignore errors
-  }
-  return [];
-}
-
-function savePinWallets(wallets: PinWallet[]): void {
-  fs.writeFileSync(PIN_WALLET_FILE, JSON.stringify(wallets, null, 2));
-}
 
 async function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -78,6 +55,22 @@ async function prompt(question: string): Promise<string> {
       resolve(answer.trim());
     });
   });
+}
+
+async function promptChainSelection(): Promise<string> {
+  console.log("\nSelect target chain:");
+  console.log(formatChainList());
+  console.log();
+
+  const choice = await prompt("Enter number: ");
+  const index = parseInt(choice) - 1;
+
+  if (index >= 0 && index < CHAIN_OPTIONS.length) {
+    return CHAIN_OPTIONS[index];
+  }
+
+  console.log("Invalid selection, defaulting to Base Sepolia");
+  return "base";
 }
 
 // ============================================================================
@@ -100,18 +93,12 @@ async function resolveENS(ensName: string): Promise<string | null> {
   }
 }
 
-// ============================================================================
-// Address Resolution (ENS, QR/hex address)
-// ============================================================================
-
 async function resolveDestination(input: string): Promise<string | null> {
-  // Check if it's already a valid address
   if (isAddress(input)) {
     console.log(`Valid address: ${input}`);
     return input;
   }
 
-  // Check if it looks like an ENS name
   if (input.includes(".")) {
     console.log(`Attempting ENS resolution for: ${input}`);
     const resolved = await resolveENS(input);
@@ -123,168 +110,200 @@ async function resolveDestination(input: string): Promise<string | null> {
     return null;
   }
 
-  // Invalid input
   console.log(`Invalid address format: ${input}`);
   return null;
 }
 
 // ============================================================================
-// ClearNode Operations
+// ClearNode Connection
 // ============================================================================
 
-async function connectAndAuth(): Promise<ReturnType<typeof getClearNode>> {
+async function connectClearNode() {
   await initWallet();
   const clearNode = getClearNode();
 
-  console.log("\nConnecting to ClearNode...");
-  await clearNode.connect();
-
-  console.log("Fetching config...");
-  await clearNode.getConfig();
-
-  console.log("Authenticating...");
-  await clearNode.authenticate();
-  console.log("Authenticated!\n");
+  if (!clearNode.isAuthenticated) {
+    console.log("\nConnecting to ClearNode...");
+    await clearNode.connect();
+    await clearNode.getConfig();
+    console.log("Authenticating...");
+    await clearNode.authenticate();
+    console.log("Authenticated!\n");
+  }
 
   return clearNode;
 }
 
-async function getBalance(): Promise<string> {
-  const clearNode = await connectAndAuth();
-
-  console.log("Fetching unified balance...");
-  const balances = await clearNode.getLedgerBalances();
-  const data = balances as any;
-
-  // Parse balance from response - check multiple possible response formats
-  const entries = data?.params?.ledgerBalances
-    || data?.params?.balances
-    || data?.params?.entries
-    || [];
-
-  for (const entry of entries) {
-    if (entry?.asset === "ytest.usd" || entry?.symbol === "ytest.usd") {
-      const rawAmount = entry?.amount || entry?.balance || "0";
-      // Convert from smallest unit (6 decimals) to human-readable
-      const humanAmount = (Number(rawAmount) / 1_000_000).toFixed(2);
-      console.log(`\n💰 Unified Balance: ${humanAmount} ytest.usd (raw: ${rawAmount})`);
-      return humanAmount;
-    }
-  }
-
-  console.log("\n💰 Unified Balance: 0.00 ytest.usd");
-  return "0";
-}
-
-async function sendFunds(destination: string, amount: string): Promise<void> {
-  const clearNode = await connectAndAuth();
-
-  console.log(`\nSending ${amount} ytest.usd to ${destination}...`);
-
-  try {
-    await clearNode.sendToWallet(destination, amount);
-    console.log("\n✅ Transfer complete!");
-  } catch (error) {
-    console.error("\n❌ Transfer failed:", error instanceof Error ? error.message : error);
-
-    if (String(error).includes("non-zero allocation")) {
-      console.log("\n⚠️  You have channels with balance blocking transfers.");
-      console.log("   Run: npm run cli channels  -- to see blocking channels");
-    }
-  }
-}
-
 // ============================================================================
-// PIN Wallet Operations
+// Commands
 // ============================================================================
 
-async function createPinWallet(amount: string): Promise<void> {
-  // Generate 6-digit PIN
-  const pin = Math.floor(100000 + Math.random() * 900000).toString();
-  const pinHash = hashPin(pin);
-  const id = generatePinWalletId();
+async function cmdBalances(): Promise<void> {
+  await initWallet();
+  console.log("\nFetching balances...");
 
-  const wallet: PinWallet = {
-    id,
-    pinHash,
-    amount,
-    createdAt: Date.now(),
-    claimed: false,
-  };
+  const balances = await getKioskBalances();
+  console.log(formatBalances(balances));
 
-  const wallets = loadPinWallets();
-  wallets.push(wallet);
-  savePinWallets(wallets);
-
-  console.log("\n" + "=".repeat(50));
-  console.log("🎫 PIN WALLET CREATED");
-  console.log("=".repeat(50));
-  console.log(`\n   Wallet ID: ${id}`);
-  console.log(`   PIN:       ${pin}`);
-  console.log(`   Amount:    ${amount} ytest.usd`);
-  console.log("\n   ⚠️  SAVE THIS PIN - it cannot be recovered!");
-  console.log("\n   To claim, visit ki0xk.com or use:");
-  console.log(`   npm run cli pin-claim`);
-  console.log("=".repeat(50));
+  // Show pending wallets summary
+  const pending = getPendingWalletsSummary();
+  if (pending.pending > 0 || pending.pendingBridge > 0) {
+    console.log(`\n⏳ Pending PIN wallets: ${pending.pending}`);
+    console.log(`🔄 Pending bridges: ${pending.pendingBridge}`);
+    console.log(`💰 Total pending value: ${pending.totalValue} USDC`);
+  }
 }
 
-async function claimPinWallet(): Promise<void> {
-  const wallets = loadPinWallets();
-  const unclaimed = wallets.filter((w) => !w.claimed);
-
-  if (unclaimed.length === 0) {
-    console.log("\n❌ No unclaimed PIN wallets found");
-    return;
-  }
-
-  console.log("\nUnclaimed PIN Wallets:");
-  unclaimed.forEach((w) => {
-    console.log(`  - ID: ${w.id}, Amount: ${w.amount} ytest.usd, Created: ${new Date(w.createdAt).toLocaleString()}`);
-  });
-
-  const walletId = await prompt("\nEnter Wallet ID: ");
-  const pin = await prompt("Enter PIN: ");
-  const destinationInput = await prompt("Enter destination (address or ENS): ");
-
-  // Find wallet
-  const wallet = wallets.find((w) => w.id === walletId && !w.claimed);
-  if (!wallet) {
-    console.log("\n❌ Wallet not found or already claimed");
-    return;
-  }
-
-  // Verify PIN
-  if (hashPin(pin) !== wallet.pinHash) {
-    console.log("\n❌ Invalid PIN");
-    return;
-  }
+async function cmdSettle(args: string[]): Promise<void> {
+  const dest = args[0] || (await prompt("Destination (address/ENS): "));
+  const chainKey = args[1] || (await promptChainSelection());
+  const amt = args[2] || (await prompt("Amount (default 0.01): ")) || "0.01";
 
   // Resolve destination
-  const destination = await resolveDestination(destinationInput);
-  if (!destination) {
+  const resolved = await resolveDestination(dest);
+  if (!resolved) {
     console.log("\n❌ Invalid destination");
     return;
   }
 
-  console.log("\n✅ PIN verified! Processing transfer...");
+  // Get chain info
+  const chainInfo = getChainByKey(chainKey);
+  if (!chainInfo) {
+    console.log("\n❌ Invalid chain");
+    return;
+  }
 
-  // Perform transfer
-  try {
-    await sendFunds(destination, wallet.amount);
+  // Show fee breakdown
+  const feeBreakdown = calculateFee(parseFloat(amt));
+  console.log(formatFeeBreakdown(feeBreakdown, chainInfo.name));
 
-    // Mark as claimed
-    wallet.claimed = true;
-    wallet.claimedAt = Date.now();
-    wallet.claimedTo = destination;
-    savePinWallets(wallets);
+  // Confirm
+  const confirm = await prompt("\nProceed? (y/n): ");
+  if (confirm.toLowerCase() !== "y") {
+    console.log("Cancelled.");
+    return;
+  }
 
-    console.log("\n🎉 PIN Wallet claimed successfully!");
-  } catch (error) {
-    console.error("\n❌ Claim failed:", error instanceof Error ? error.message : error);
+  // Execute settlement
+  console.log("\n🚀 Processing settlement...");
+  const result = await settleToChain(resolved, chainKey, amt);
+
+  if (result.success) {
+    console.log("\n✅ " + result.message);
+    if (result.bridgeResult?.txHash) {
+      console.log(`📜 Bridge TX: ${result.bridgeResult.txHash}`);
+    }
+  } else {
+    console.log("\n⚠️ " + result.message);
+    if (result.fallbackPin) {
+      console.log(`\n🎫 Fallback PIN created: ${result.fallbackPin}`);
+      console.log(`   Wallet ID: ${result.fallbackId}`);
+      console.log("   Use this PIN to retry the bridge later.");
+    }
   }
 }
 
-async function listPinWallets(): Promise<void> {
+async function cmdBridge(args: string[]): Promise<void> {
+  const dest = args[0] || (await prompt("Destination address: "));
+  const chainKey = args[1] || (await promptChainSelection());
+  const amt = args[2] || (await prompt("Amount (default 0.01): ")) || "0.01";
+
+  // Validate address
+  if (!isAddress(dest)) {
+    console.log("\n❌ Invalid address (must be 0x...)");
+    return;
+  }
+
+  const chainInfo = getChainByKey(chainKey);
+  if (!chainInfo) {
+    console.log("\n❌ Invalid chain");
+    return;
+  }
+
+  // Show fee
+  const feeBreakdown = calculateFee(parseFloat(amt));
+  console.log(formatFeeBreakdown(feeBreakdown, chainInfo.name));
+
+  console.log("\n🌉 Initiating bridge (Arc → " + chainInfo.name + ")...");
+
+  const result = await bridgeToChain(
+    dest,
+    chainKey,
+    amt,
+    config.FEE_RECIPIENT_ADDRESS
+  );
+
+  if (result.success) {
+    console.log("\n✅ Bridge successful!");
+    console.log(`📜 TX Hash: ${result.txHash}`);
+    console.log(`🔗 Explorer: ${chainInfo.explorerUrl}/tx/${result.txHash}`);
+  } else {
+    console.log("\n❌ Bridge failed: " + result.error);
+  }
+}
+
+async function cmdPinCreate(args: string[]): Promise<void> {
+  const amount = args[0] || (await prompt("Amount to lock (default 0.01): ")) || "0.01";
+
+  const wallet = createPinWallet(amount);
+
+  console.log("\n" + "═".repeat(50));
+  console.log("🎫 PIN WALLET CREATED");
+  console.log("═".repeat(50));
+  console.log(`\n   Wallet ID: ${wallet.id}`);
+  console.log(`   PIN:       ${wallet.pin}`);
+  console.log(`   Amount:    ${wallet.amount} USDC`);
+  console.log("\n   ⚠️  SAVE THIS PIN - it cannot be recovered!");
+  console.log("\n   To claim, run: npm run cli pin-claim");
+  console.log("═".repeat(50));
+}
+
+async function cmdPinClaim(): Promise<void> {
+  const wallets = loadPinWallets();
+  const claimable = wallets.filter((w) => w.status === "PENDING" || w.status === "PENDING_BRIDGE");
+
+  if (claimable.length === 0) {
+    console.log("\n❌ No claimable PIN wallets found");
+    return;
+  }
+
+  console.log("\nClaimable PIN Wallets:");
+  console.log("─".repeat(60));
+  claimable.forEach((w) => {
+    const status = w.status === "PENDING_BRIDGE" ? "🔄 Retry needed" : "⏳ Pending";
+    console.log(`  ID: ${w.id} | Amount: ${w.amount} USDC | ${status}`);
+  });
+  console.log();
+
+  const walletId = await prompt("Enter Wallet ID: ");
+  const pin = await prompt("Enter PIN: ");
+  const dest = await prompt("Destination (address/ENS): ");
+  const chainKey = await promptChainSelection();
+
+  // Resolve destination
+  const resolved = await resolveDestination(dest);
+  if (!resolved) {
+    console.log("\n❌ Invalid destination");
+    return;
+  }
+
+  console.log("\n🚀 Processing claim...");
+
+  try {
+    const result = await claimPinWallet(walletId, pin, resolved, chainKey);
+
+    if (result.success) {
+      console.log("\n✅ " + result.message);
+      console.log("🎉 PIN wallet claimed successfully!");
+    } else {
+      console.log("\n⚠️ " + result.message);
+    }
+  } catch (error) {
+    console.log("\n❌ " + (error instanceof Error ? error.message : error));
+  }
+}
+
+async function cmdPinList(): Promise<void> {
   const wallets = loadPinWallets();
 
   if (wallets.length === 0) {
@@ -293,45 +312,91 @@ async function listPinWallets(): Promise<void> {
   }
 
   console.log("\nPIN Wallets:");
-  console.log("-".repeat(80));
+  console.log("─".repeat(80));
 
-  wallets.forEach((w) => {
-    const status = w.claimed ? `✅ Claimed to ${w.claimedTo}` : "⏳ Unclaimed";
-    console.log(`ID: ${w.id} | Amount: ${w.amount} | Status: ${status}`);
-  });
+  for (const w of wallets) {
+    let statusIcon = "";
+    switch (w.status) {
+      case "PENDING":
+        statusIcon = "⏳";
+        break;
+      case "PENDING_BRIDGE":
+        statusIcon = "🔄";
+        break;
+      case "SETTLED":
+        statusIcon = "✅";
+        break;
+      case "FAILED":
+        statusIcon = "❌";
+        break;
+    }
+
+    console.log(`${statusIcon} ID: ${w.id} | Amount: ${w.amount} USDC | Status: ${w.status}`);
+    if (w.destination) {
+      console.log(`   → ${w.destination} (${w.targetChain})`);
+    }
+    if (w.bridgeTxHash) {
+      console.log(`   TX: ${w.bridgeTxHash}`);
+    }
+  }
+
+  // Summary
+  const summary = getPendingWalletsSummary();
+  console.log("─".repeat(80));
+  console.log(`Total: ${wallets.length} | Pending: ${summary.pending} | Bridge pending: ${summary.pendingBridge} | Settled: ${summary.settled} | Failed: ${summary.failed}`);
 }
 
-async function checkChannels(): Promise<void> {
-  const clearNode = await connectAndAuth();
+async function cmdRetry(): Promise<void> {
+  console.log("\n🔄 Retrying pending bridges...");
 
-  console.log("Fetching channels...");
-  const channels = await clearNode.getChannels();
-  const data = channels as any;
-  const channelList = data?.params?.channels || [];
+  const result = await retryPendingBridges();
 
-  if (channelList.length === 0) {
-    console.log("\n✅ No channels found - transfers are unblocked!");
-    return;
+  console.log(`\nAttempted: ${result.attempted}`);
+  console.log(`Succeeded: ${result.succeeded}`);
+  console.log(`Failed: ${result.failed}`);
+}
+
+async function cmdResolve(args: string[]): Promise<void> {
+  const name = args[0] || (await prompt("Enter ENS name or address: "));
+  const resolved = await resolveDestination(name);
+
+  if (resolved) {
+    console.log(`\n✅ Resolved: ${resolved}`);
+  } else {
+    console.log(`\n❌ Could not resolve: ${name}`);
+  }
+}
+
+async function cmdChains(): Promise<void> {
+  console.log("\nSupported Chains (Testnet):");
+  console.log("─".repeat(50));
+
+  for (const key of CHAIN_OPTIONS) {
+    const chain = SUPPORTED_CHAINS[key];
+    console.log(`  ${key.padEnd(12)} → ${chain.name} (${chain.chainId})`);
   }
 
-  console.log("\nChannels:");
-  console.log("-".repeat(80));
+  console.log("─".repeat(50));
+  console.log("Source: Arc Testnet (liquidity hub)");
+}
 
-  let hasBlocking = false;
-  for (const ch of channelList) {
-    const amount = ch?.amount || ch?.balance || "0";
-    const isBlocking = BigInt(amount) > 0n;
-    if (isBlocking) hasBlocking = true;
+async function cmdTest(): Promise<void> {
+  console.log("\n🧪 Running test flow...\n");
 
-    const status = isBlocking ? "⚠️  BLOCKING" : "✅ OK";
-    console.log(`ID: ${ch?.channel_id || ch?.channelId}`);
-    console.log(`   Amount: ${amount} | Status: ${ch?.status} | ${status}`);
-  }
+  // 1. Check balances
+  console.log("1. Checking balances...");
+  await cmdBalances();
 
-  if (hasBlocking) {
-    console.log("\n⚠️  Channels with non-zero balance block transfers!");
-    console.log("   Close or resize them to enable transfers.");
-  }
+  // 2. Test ENS
+  console.log("\n2. Testing ENS resolution...");
+  const vitalik = await resolveENS("vitalik.eth");
+  console.log(`   vitalik.eth → ${vitalik}`);
+
+  // 3. Show chains
+  console.log("\n3. Available chains:");
+  await cmdChains();
+
+  console.log("\n✅ Test flow complete!");
 }
 
 // ============================================================================
@@ -341,110 +406,90 @@ async function checkChannels(): Promise<void> {
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0];
+  const cmdArgs = args.slice(1);
 
-  console.log("=".repeat(50));
-  console.log("Ki0xk CLI - Kiosk Testing Tool");
-  console.log("=".repeat(50));
+  console.log("═".repeat(50));
+  console.log("Ki0xk CLI - Kiosk + Arc Bridge");
+  console.log("═".repeat(50));
 
   if (config.MOCK_MODE) {
-    console.log("⚠️  Running in MOCK_MODE - ClearNode operations disabled\n");
+    console.log("⚠️  Running in MOCK_MODE\n");
   }
 
   try {
     switch (command) {
+      case "balances":
       case "balance":
-        await getBalance();
+        await cmdBalances();
         break;
 
-      case "resolve": {
-        const name = args[1] || (await prompt("Enter ENS name or address: "));
-        const resolved = await resolveDestination(name);
-        if (resolved) {
-          console.log(`\n✅ Resolved: ${resolved}`);
-        } else {
-          console.log(`\n❌ Could not resolve: ${name}`);
-        }
+      case "settle":
+        await cmdSettle(cmdArgs);
         break;
-      }
 
-      case "send": {
-        const dest = args[1] || (await prompt("Enter destination (address or ENS): "));
-        const amt = args[2] || (await prompt("Enter amount (default 0.01): ")) || "0.01";
-
-        const resolved = await resolveDestination(dest);
-        if (!resolved) {
-          console.log("\n❌ Invalid destination");
-          process.exit(1);
-        }
-
-        await sendFunds(resolved, amt);
+      case "bridge":
+        await cmdBridge(cmdArgs);
         break;
-      }
 
-      case "pin-create": {
-        const amount = args[1] || (await prompt("Enter amount to lock (default 0.01): ")) || "0.01";
-        await createPinWallet(amount);
+      case "resolve":
+        await cmdResolve(cmdArgs);
         break;
-      }
+
+      case "chains":
+        await cmdChains();
+        break;
+
+      case "pin-create":
+        await cmdPinCreate(cmdArgs);
+        break;
 
       case "pin-claim":
-        await claimPinWallet();
+        await cmdPinClaim();
         break;
 
       case "pin-list":
-        await listPinWallets();
+        await cmdPinList();
         break;
 
-      case "channels":
-        await checkChannels();
+      case "retry":
+        await cmdRetry();
         break;
 
-      case "test": {
-        // Quick test flow
-        console.log("\n🧪 Running test flow...\n");
-
-        // 1. Check balance
-        console.log("1. Checking balance...");
-        await getBalance();
-
-        // 2. Test ENS resolution
-        console.log("\n2. Testing ENS resolution...");
-        const vitalik = await resolveENS("vitalik.eth");
-        console.log(`   vitalik.eth → ${vitalik}`);
-
-        // 3. Check channels
-        console.log("\n3. Checking channels...");
-        await checkChannels();
-
-        console.log("\n✅ Test flow complete!");
+      case "test":
+        await cmdTest();
         break;
-      }
 
       default:
         console.log(`
 Usage: npm run cli <command> [args]
 
-Commands:
-  balance              Check unified balance (ytest.usd)
-  resolve <name>       Resolve ENS name or validate address
-  send <dest> [amt]    Send ytest.usd (default: 0.01)
-  channels             Check for blocking channels
+Balances & Status:
+  balances             Show Yellow + Arc balances
+  chains               List supported chains
 
-PIN Wallet (for users without wallets):
+Settlement (Yellow + Arc):
+  settle <dest> [chain] [amt]   Full settlement flow
+  bridge <dest> [chain] [amt]   Direct Arc bridge only
+
+ENS:
+  resolve <name>       Resolve ENS or validate address
+
+PIN Wallets:
   pin-create [amt]     Create PIN-protected deposit
-  pin-claim            Claim funds with PIN
+  pin-claim            Claim funds with PIN + chain selection
   pin-list             List all PIN wallets
+  retry                Retry pending bridges
 
 Testing:
   test                 Run full test flow
 
 Examples:
-  npm run cli balance
-  npm run cli resolve vitalik.eth
-  npm run cli send 0x1234...abcd 0.01
-  npm run cli send vitalik.eth 0.05
-  npm run cli pin-create 0.01
-  npm run cli test
+  npm run cli balances
+  npm run cli settle 0x8439...fC base 0.01
+  npm run cli settle vitalik.eth arbitrum 0.05
+  npm run cli bridge 0x8439...fC polygon 0.01
+  npm run cli pin-create 1.00
+  npm run cli chains
 `);
     }
   } catch (error) {
