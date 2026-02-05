@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment (NEVER commit!)
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Data
+*.sqlite
+*.db
+data/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# PIN wallet local storage (contains sensitive data)
+pin-wallets.json
+
+# Large documentation files (fetch fresh)
+llms-full.txt
