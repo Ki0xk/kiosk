@@ -30,6 +30,16 @@ import {
   retryPendingBridges,
   getPendingWalletsSummary,
 } from "./settlement.js";
+import {
+  startSession,
+  depositToSession,
+  endSession,
+  getSession,
+  getActiveSessions,
+  getAllSessions,
+  getSessionSummary,
+  formatSession,
+} from "./session.js";
 import { bridgeToChain, getArcBalance } from "./arc/bridge.js";
 import { calculateFee, formatFeeBreakdown } from "./arc/fees.js";
 import { SUPPORTED_CHAINS, CHAIN_OPTIONS, formatChainList, getChainByKey } from "./arc/chains.js";
@@ -356,6 +366,164 @@ async function cmdRetry(): Promise<void> {
   console.log(`Failed: ${result.failed}`);
 }
 
+// ============================================================================
+// Session Commands (Yellow Network Channel Lifecycle)
+// ============================================================================
+
+async function cmdSessionStart(args: string[]): Promise<void> {
+  const userIdentifier = args[0] || undefined;
+
+  console.log("\n🚀 Starting new session...");
+  if (userIdentifier) {
+    console.log(`   User: ${userIdentifier}`);
+  }
+
+  const result = await startSession(userIdentifier);
+
+  if (result.success) {
+    console.log("\n✅ " + result.message);
+    console.log(`\n📋 Session ID: ${result.sessionId}`);
+    if (result.channelId) {
+      console.log(`📺 Channel ID: ${result.channelId}`);
+    }
+    console.log("\nUse 'session-deposit' to add funds (cash insertions)");
+  } else {
+    console.log("\n⚠️ " + result.message);
+    console.log(`📋 Session ID: ${result.sessionId} (no channel)`);
+  }
+}
+
+async function cmdSessionDeposit(args: string[]): Promise<void> {
+  const sessionId = args[0] || (await prompt("Session ID: "));
+  const amount = args[1] || (await prompt("Amount (default 0.01): ")) || "0.01";
+
+  console.log(`\n💵 Processing cash deposit to session ${sessionId}...`);
+
+  const result = await depositToSession(sessionId, amount);
+
+  if (result.success) {
+    console.log("\n✅ " + result.message);
+  } else {
+    console.log("\n⚠️ " + result.message);
+  }
+
+  console.log(`\n   Current Balance: ${result.newBalance} USDC`);
+  console.log(`   Total Deposited: ${result.totalDeposited} USDC`);
+}
+
+async function cmdSessionEnd(args: string[]): Promise<void> {
+  const sessionId = args[0] || (await prompt("Session ID: "));
+  const dest = args[1] || (await prompt("Destination (address/ENS): "));
+  const chainKey = args[2] || (await promptChainSelection());
+
+  // Resolve destination
+  const resolved = await resolveDestination(dest);
+  if (!resolved) {
+    console.log("\n❌ Invalid destination");
+    return;
+  }
+
+  const session = getSession(sessionId);
+  if (!session) {
+    console.log("\n❌ Session not found");
+    return;
+  }
+
+  console.log(`\n🏁 Ending session ${sessionId}...`);
+  console.log(`   Balance: ${session.currentBalance} USDC`);
+  console.log(`   Destination: ${resolved}`);
+  console.log(`   Chain: ${chainKey}`);
+
+  const confirm = await prompt("\nProceed? (y/n): ");
+  if (confirm.toLowerCase() !== "y") {
+    console.log("Cancelled.");
+    return;
+  }
+
+  console.log("\n⏳ Closing channel and bridging...");
+
+  const result = await endSession(sessionId, resolved, chainKey);
+
+  if (result.success) {
+    console.log("\n✅ " + result.message);
+    if (result.bridgeTxHash) {
+      console.log(`📜 Bridge TX: ${result.bridgeTxHash}`);
+    }
+    console.log(`💰 Net amount: ${result.settledAmount} USDC`);
+    console.log(`💸 Fee: ${result.fee.fee} USDC (${result.fee.feePercentage}%)`);
+  } else {
+    console.log("\n❌ " + result.message);
+  }
+}
+
+async function cmdSessionStatus(args: string[]): Promise<void> {
+  const sessionId = args[0];
+
+  if (sessionId) {
+    const session = getSession(sessionId);
+    if (!session) {
+      console.log("\n❌ Session not found");
+      return;
+    }
+    console.log(formatSession(session));
+    return;
+  }
+
+  // Show all sessions summary
+  const summary = getSessionSummary();
+  const active = getActiveSessions();
+
+  console.log("\n" + "═".repeat(50));
+  console.log("Ki0xk Sessions Summary");
+  console.log("═".repeat(50));
+  console.log(`Active:    ${summary.active}`);
+  console.log(`Settling:  ${summary.settling}`);
+  console.log(`Settled:   ${summary.settled}`);
+  console.log(`Failed:    ${summary.failed}`);
+  console.log(`\nActive Value: ${summary.totalValue} USDC`);
+
+  if (active.length > 0) {
+    console.log("\n─".repeat(50));
+    console.log("Active Sessions:");
+    for (const s of active) {
+      const duration = Math.floor((Date.now() - s.startedAt) / 1000 / 60);
+      console.log(`  ${s.id} | ${s.currentBalance} USDC | ${duration}m | ${s.channelId ? "📺" : "⚠️"}`);
+    }
+  }
+
+  console.log("═".repeat(50));
+}
+
+async function cmdSessionList(): Promise<void> {
+  const sessions = getAllSessions();
+
+  if (sessions.length === 0) {
+    console.log("\nNo sessions found");
+    return;
+  }
+
+  console.log("\nAll Sessions:");
+  console.log("─".repeat(80));
+
+  for (const s of sessions) {
+    let statusIcon = "";
+    switch (s.status) {
+      case "ACTIVE": statusIcon = "🟢"; break;
+      case "SETTLING": statusIcon = "🔄"; break;
+      case "SETTLED": statusIcon = "✅"; break;
+      case "FAILED": statusIcon = "❌"; break;
+    }
+
+    console.log(`${statusIcon} ${s.id} | ${s.currentBalance.padStart(8)} USDC | ${s.status.padEnd(10)} | ${s.channelId ? "Channel: " + s.channelId.slice(0, 10) + "..." : "No channel"}`);
+
+    if (s.destinationChain) {
+      console.log(`   → ${s.destinationAddress?.slice(0, 20)}... (${s.destinationChain})`);
+    }
+  }
+
+  console.log("─".repeat(80));
+}
+
 async function cmdResolve(args: string[]): Promise<void> {
   const name = args[0] || (await prompt("Enter ENS name or address: "));
   const resolved = await resolveDestination(name);
@@ -459,6 +627,29 @@ async function main() {
         await cmdTest();
         break;
 
+      // Session commands (Yellow Network channel lifecycle)
+      case "session-start":
+        await cmdSessionStart(cmdArgs);
+        break;
+
+      case "session-deposit":
+        await cmdSessionDeposit(cmdArgs);
+        break;
+
+      case "session-end":
+        await cmdSessionEnd(cmdArgs);
+        break;
+
+      case "session-status":
+      case "session":
+        await cmdSessionStatus(cmdArgs);
+        break;
+
+      case "session-list":
+      case "sessions":
+        await cmdSessionList();
+        break;
+
       default:
         console.log(`
 Usage: npm run cli <command> [args]
@@ -467,7 +658,14 @@ Balances & Status:
   balances             Show Yellow + Arc balances
   chains               List supported chains
 
-Settlement (Yellow + Arc):
+Sessions (Yellow Network Channels):
+  session-start [user]           Start new session (opens channel)
+  session-deposit <id> [amt]     Add funds (off-chain state update)
+  session-end <id> <dest> [chain] End session (close channel + bridge)
+  session-status [id]            Show session status
+  sessions                       List all sessions
+
+Settlement (Direct - no session):
   settle <dest> [chain] [amt]   Full settlement flow
   bridge <dest> [chain] [amt]   Direct Arc bridge only
 
@@ -483,12 +681,16 @@ PIN Wallets:
 Testing:
   test                 Run full test flow
 
+Session Flow Example:
+  npm run cli session-start vitalik.eth   # Open channel
+  npm run cli session-deposit S1234 5.00  # User inserts $5 cash
+  npm run cli session-deposit S1234 2.50  # User inserts more cash
+  npm run cli session-end S1234 0x... base # Close + bridge to Base
+
 Examples:
   npm run cli balances
+  npm run cli session-start
   npm run cli settle 0x8439...fC base 0.01
-  npm run cli settle vitalik.eth arbitrum 0.05
-  npm run cli bridge 0x8439...fC polygon 0.01
-  npm run cli pin-create 1.00
   npm run cli chains
 `);
     }
