@@ -141,7 +141,15 @@ export function formatBalances(balances: KioskBalances): string {
 // ============================================================================
 
 /**
- * Full settlement: Yellow accounting + Arc bridging
+ * Full settlement: Yellow channel + Arc bridging
+ *
+ * Flow:
+ * 1. Create PIN wallet first (safety backup)
+ * 2. Open Yellow channel
+ * 3. Bridge via Arc
+ * 4. Close Yellow channel
+ * 5. Success → PIN marked settled
+ * 6. Failure → PIN ready for retry
  */
 export async function settleToChain(
   destination: string,
@@ -162,19 +170,28 @@ export async function settleToChain(
     fee: feeBreakdown.fee,
   });
 
-  // Step 1: Check Arc liquidity
-  const liquidity = await checkLiquidity(amount);
-  if (!liquidity.sufficient) {
-    logger.warn("Insufficient Arc liquidity", {
-      available: liquidity.available,
-      required: liquidity.required,
-    });
-    // Continue anyway for hackathon demo - in production, block here
-  }
+  // Step 1: Create PIN wallet FIRST (safety backup)
+  const wallets = loadPinWallets();
+  const pin = generatePin();
+  const pinWallet: PinWallet = {
+    id: generateWalletId(),
+    pinHash: hashPin(pin),
+    amount,
+    createdAt: Date.now(),
+    destination,
+    targetChain: targetChainKey,
+    status: "PENDING_BRIDGE",
+    bridgeAttempts: 0,
+  };
+  wallets.push(pinWallet);
+  savePinWallets(wallets);
 
-  // Step 2: Record in Yellow (accounting)
-  let yellowRecorded = false;
+  logger.info("PIN backup created", { id: pinWallet.id, pin });
+
+  let channelId: string | null = null;
+
   try {
+    // Step 2: Connect and authenticate with Yellow
     const clearNode = getClearNode();
     if (!clearNode.isAuthenticated) {
       await clearNode.connect();
@@ -182,52 +199,84 @@ export async function settleToChain(
       await clearNode.authenticate();
     }
 
-    // Record as internal transfer in Yellow
-    // This is accounting only - real USDC goes via Arc
-    await clearNode.transfer(destination, "ytest.usd", amount);
-    yellowRecorded = true;
-    logger.info("Yellow accounting recorded", { destination, amount });
+    // Step 3: Open Yellow channel
+    logger.info("Opening Yellow channel...");
+    channelId = await clearNode.createChannel(YTEST_USD_TOKEN, BASE_SEPOLIA_CHAIN_ID);
+    logger.info("Channel opened", { channelId });
+
+    // Step 4: Bridge via Arc
+    logger.info("Bridging via Arc...", { destination, chain: chainInfo.name });
+    const feeRecipient = config.FEE_RECIPIENT_ADDRESS || undefined;
+    const bridgeResult = await bridgeToChain(
+      destination,
+      targetChainKey,
+      amount,
+      feeRecipient
+    );
+
+    // Step 5: Close Yellow channel
+    if (channelId) {
+      logger.info("Closing Yellow channel...");
+      await clearNode.closeChannel(channelId, kioskAddress);
+      logger.info("Channel closed");
+    }
+
+    // Step 6: Update PIN status based on result
+    if (bridgeResult.success) {
+      pinWallet.status = "SETTLED";
+      pinWallet.bridgeTxHash = bridgeResult.txHash;
+      pinWallet.settledAt = Date.now();
+      savePinWallets(wallets);
+
+      return {
+        success: true,
+        yellowRecorded: true,
+        bridgeResult,
+        message: `Settlement complete! ${feeBreakdown.netAmount} USDC sent to ${chainInfo.name}`,
+      };
+    } else {
+      pinWallet.bridgeAttempts++;
+      pinWallet.lastBridgeError = bridgeResult.error;
+      pinWallet.lastBridgeAttempt = Date.now();
+      savePinWallets(wallets);
+
+      return {
+        success: false,
+        yellowRecorded: true,
+        bridgeResult,
+        fallbackPin: pin,
+        fallbackId: pinWallet.id,
+        message: `Bridge failed. PIN: ${pin} - Use to retry later.`,
+      };
+    }
   } catch (error) {
-    logger.error("Yellow recording failed", { error });
-    // Continue to try bridge anyway
-  }
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    logger.error("Settlement failed", { error: errorMsg });
 
-  // Step 3: Bridge via Arc
-  const feeRecipient = config.FEE_RECIPIENT_ADDRESS || undefined;
-  const bridgeResult = await bridgeToChain(
-    destination,
-    targetChainKey,
-    amount,
-    feeRecipient
-  );
+    // Try to close channel if it was opened
+    if (channelId) {
+      try {
+        const clearNode = getClearNode();
+        await clearNode.closeChannel(channelId, kioskAddress);
+      } catch {
+        // Ignore close errors
+      }
+    }
 
-  if (bridgeResult.success) {
+    // Update PIN wallet with error
+    pinWallet.bridgeAttempts++;
+    pinWallet.lastBridgeError = errorMsg;
+    pinWallet.lastBridgeAttempt = Date.now();
+    savePinWallets(wallets);
+
     return {
-      success: true,
-      yellowRecorded,
-      bridgeResult,
-      message: `Settlement complete! ${feeBreakdown.netAmount} USDC sent to ${chainInfo.name}`,
+      success: false,
+      yellowRecorded: false,
+      fallbackPin: pin,
+      fallbackId: pinWallet.id,
+      message: `Settlement failed. PIN: ${pin} - Use to retry later.`,
     };
   }
-
-  // Step 4: Bridge failed - create PIN fallback
-  logger.warn("Bridge failed, creating PIN fallback");
-
-  const pinWallet = createPendingBridgeWallet({
-    amount,
-    destination,
-    targetChain: targetChainKey,
-    error: bridgeResult.error || "Unknown error",
-  });
-
-  return {
-    success: false,
-    yellowRecorded,
-    bridgeResult,
-    fallbackPin: pinWallet.pin,
-    fallbackId: pinWallet.id,
-    message: `Bridge delayed. PIN: ${pinWallet.pin} - Use to complete later.`,
-  };
 }
 
 // ============================================================================
