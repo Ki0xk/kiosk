@@ -8,7 +8,7 @@ Physical-first crypto infrastructure for cash economies and high-frequency venue
 
 **Festivals & Events** — Temporary venues where speed matters, NFC wristbands replace wallets, and thousands of micro-transactions happen in hours.
 
-Powered by [Yellow Network](https://yellow.org) state channels, Ki0xk enables instant cash-to-USDC without exposing users to blockchain complexity.
+Powered by [Yellow Network](https://yellow.org) for instant accounting and [Circle Arc](https://developers.circle.com/stablecoins/bridge-kit) for cross-chain USDC settlement.
 
 > People don't need to "use crypto."
 > They put in cash, tap, and pay.
@@ -23,9 +23,11 @@ Powered by [Yellow Network](https://yellow.org) state channels, Ki0xk enables in
 │   Inserted      │     │   (kiosk node)   │     │   USDC received    │
 └─────────────────┘     └──────────────────┘     └────────────────────┘
                                │
-                        Off-chain transfer
-                        via Yellow Network
-                        (instant, zero gas)
+                    ┌──────────┴──────────┐
+                    │                     │
+              Yellow Network         Arc Bridge
+              (accounting)         (real USDC)
+              instant, off-chain   any EVM chain
 ```
 
 ### The Flow
@@ -42,17 +44,48 @@ Powered by [Yellow Network](https://yellow.org) state channels, Ki0xk enables in
 
 ## Architecture
 
-Ki0xk uses Yellow Network's **Unified Balance** for instant off-chain transfers:
+Ki0xk uses a **two-layer architecture** for maximum flexibility:
 
-- **Deposit once** → Funds enter Yellow (on-chain)
-- **Transfer many times** → Off-chain, instant, zero gas
-- **Withdraw when needed** → Back to on-chain (optional)
+### Layer 1: Yellow Network (Accounting)
+- **Instant off-chain transfers** using ytest.usd
+- **No gas fees** for internal operations
+- **Real-time balance tracking** for kiosk operations
+- Perfect for high-frequency micro-transactions
 
-This is perfect for high-frequency, low-value transactions like tiendita purchases or festival payments.
+### Layer 2: Arc Bridge (Settlement)
+- **Real USDC delivery** to user's preferred chain
+- **Cross-chain via CCTP** (Circle's Cross-Chain Transfer Protocol)
+- **User choice** — Base, Ethereum, Arbitrum, Polygon, Optimism, Avalanche, Linea
+- **0.001% fee** — designed for micro-transaction onboarding
 
-### Why Not Channels?
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Ki0xk Settlement                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Yellow Network                    Arc Bridge                   │
+│   ┌─────────────┐                  ┌─────────────┐              │
+│   │  ytest.usd  │                  │    USDC     │              │
+│   │  accounting │ ───────────────▶ │  bridging   │              │
+│   │   (fast)    │                  │  (real $)   │              │
+│   └─────────────┘                  └─────────────┘              │
+│         │                                │                       │
+│         ▼                                ▼                       │
+│   Internal record                  User receives                │
+│   for kiosk ops                    real USDC on                 │
+│                                    their chain                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-Yellow's protocol has a rule: channels with balance block transfers. For ATM operations, we skip channels entirely and work directly with unified balance. Simpler, faster, no blocking.
+### Why Two Layers?
+
+| Layer | Purpose | Speed | Cost |
+|-------|---------|-------|------|
+| Yellow | Kiosk accounting, internal ops | Instant | Zero gas |
+| Arc | User settlement, real USDC | ~15-30 sec | 0.001% fee |
+
+Yellow handles the fast stuff. Arc delivers the real value.
 
 ---
 
@@ -102,17 +135,21 @@ npm run cli send 0xDestination 0.01
 npm run cli <command>
 
 # Balance & Status
-balance              Check unified balance (ytest.usd)
-channels             Check for blocking channels
+balances             Show Yellow + Arc balances
+chains               List supported destination chains
 
-# Transfers
-send <dest> [amt]    Send ytest.usd (default: 0.01)
+# Settlement (Yellow + Arc)
+settle <dest> [chain] [amt]   Full settlement flow
+bridge <dest> [chain] [amt]   Direct Arc bridge only
+
+# ENS
 resolve <name>       Resolve ENS or validate address
 
 # PIN Wallets (for users without wallets)
 pin-create [amt]     Create PIN-protected deposit
-pin-claim            Claim funds with PIN
-pin-list             List PIN wallets
+pin-claim            Claim funds with PIN + chain selection
+pin-list             List all PIN wallets
+retry                Retry pending bridges
 
 # Testing
 test                 Run full test flow
@@ -121,20 +158,35 @@ test                 Run full test flow
 ### Examples
 
 ```bash
-# Check your balance
-npm run cli balance
-# 💰 Unified Balance: 10.00 ytest.usd
+# Check all balances
+npm run cli balances
+# ╔═══════════════════════════════════════════════════════╗
+# ║           Ki0xk Kiosk Balances                        ║
+# ╠═══════════════════════════════════════════════════════╣
+# ║  Yellow (Accounting):       10.00 ytest.usd          ║
+# ║  Arc (Liquidity):            5.00 USDC               ║
+# ╚═══════════════════════════════════════════════════════╝
 
-# Send to an address
-npm run cli send 0x843914e5BBdbE92296F2c3D895D424301b3517fC 0.01
-# ✅ Transfer complete!
+# Settle to Base (full flow)
+npm run cli settle 0x843914e5BBdbE92296F2c3D895D424301b3517fC base 0.01
+# ✅ Settlement complete! 0.00999999 USDC sent to Base Sepolia
 
-# Send to an ENS name
-npm run cli send vitalik.eth 0.01
+# Settle to ENS name on Arbitrum
+npm run cli settle vitalik.eth arbitrum 0.05
 
-# Create a PIN wallet for a first-timer
+# Direct bridge (skip Yellow accounting)
+npm run cli bridge 0x843914e5BBdbE92296F2c3D895D424301b3517fC polygon 0.01
+
+# Create a PIN wallet for first-timer
 npm run cli pin-create 5.00
 # 🎫 PIN: 847291 | Wallet ID: A3F2
+
+# List supported chains
+npm run cli chains
+# base       → Base Sepolia (84532)
+# ethereum   → Ethereum Sepolia (11155111)
+# arbitrum   → Arbitrum Sepolia (421614)
+# ...
 ```
 
 ---
@@ -169,8 +221,28 @@ npm run cli pin-create 5.00
 3. Prints receipt: "PIN: 847291"
 4. Later: download any wallet app
 5. Visit ki0xk.com, enter PIN
-6. Funds transfer to real wallet
+6. Choose destination chain
+7. Funds bridged to real wallet
 ```
+
+### Bridge Failure Recovery
+
+If the cross-chain bridge fails (network issues, liquidity, etc.):
+
+```
+1. Settlement initiated
+2. Yellow accounting recorded ✓
+3. Arc bridge fails ✗
+4. System generates PIN: 123456
+5. Customer keeps PIN
+6. Later: npm run cli retry
+   OR
+   Customer returns with PIN
+7. Retry bridge with PIN
+8. Funds delivered successfully
+```
+
+No funds lost — just delayed. PIN system handles retries.
 
 ---
 
@@ -182,8 +254,22 @@ npm run cli pin-create 5.00
 | `CHAIN_ID` | Target chain | `84532` (Base Sepolia) |
 | `RPC_URL` | Chain RPC | `https://sepolia.base.org` |
 | `CLEARNODE_WS_URL` | Yellow endpoint | `wss://clearnet-sandbox.yellow.com/ws` |
+| `FEE_RECIPIENT_ADDRESS` | Where 0.001% fees are collected | Optional |
 | `MOCK_MODE` | Skip ClearNode | `false` |
 | `LOG_LEVEL` | Verbosity | `info` |
+
+### Fee Structure
+
+Ki0xk charges a minimal **0.001% fee** on settlements — designed for micro-transaction onboarding.
+
+```
+Example: User settles 10.00 USDC
+├── Gross amount:  10.00 USDC
+├── Fee (0.001%):   0.0001 USDC
+└── Net to user:    9.9999 USDC
+```
+
+Fees are collected via Circle's customFee mechanism in Bridge Kit.
 
 ---
 
@@ -198,12 +284,19 @@ npm run cli pin-create 5.00
 | Broker | `0xc7E6827ad9DA2c89188fAEd836F9285E6bFdCCCC` |
 | ytest.usd | `0xDB9F293e3898c9E5536A3be1b0C56c89d2b32DEb` |
 
-### Supported Chains
+### Supported Destination Chains (via Arc)
 
-- Base Sepolia (84532)
-- Ethereum Sepolia (11155111)
-- Polygon Amoy (80002)
-- Linea Sepolia (59141)
+| Chain | Network | Chain ID |
+|-------|---------|----------|
+| Base | Sepolia | 84532 |
+| Ethereum | Sepolia | 11155111 |
+| Arbitrum | Sepolia | 421614 |
+| Polygon | Amoy | 80002 |
+| Optimism | Sepolia | 11155420 |
+| Avalanche | Fuji | 43113 |
+| Linea | Sepolia | 59141 |
+
+**Source Chain**: Arc Testnet (USDC liquidity hub)
 
 ---
 
@@ -235,11 +328,16 @@ kiosk/
 │   ├── index.ts        # Kiosk daemon entry point
 │   ├── cli.ts          # CLI testing tool
 │   ├── clearnode.ts    # Yellow Network client
+│   ├── settlement.ts   # Yellow + Arc orchestrator
 │   ├── wallet.ts       # Viem wallet setup
 │   ├── config.ts       # Environment validation
-│   └── logger.ts       # Structured logging
-├── scripts/
-│   └── test-transfer.sh
+│   ├── logger.ts       # Structured logging
+│   └── arc/
+│       ├── bridge.ts   # Arc Bridge Kit wrapper
+│       ├── chains.ts   # Supported chain configs
+│       └── fees.ts     # Fee calculation
+├── docs/
+│   └── ARC_INTEGRATION_PLAN.md
 ├── .env.example
 ├── package.json
 └── tsconfig.json
@@ -252,7 +350,8 @@ kiosk/
 - **Runtime**: Node.js 18+
 - **Language**: TypeScript
 - **Blockchain**: viem (Base Sepolia)
-- **State Channels**: @erc7824/nitrolite
+- **State Channels**: @erc7824/nitrolite (Yellow Network)
+- **Cross-Chain**: @circle-fin/bridge-kit (Arc / CCTP)
 - **WebSocket**: yellow-ts
 - **Validation**: Zod
 - **ENS**: viem/ens
@@ -266,6 +365,11 @@ kiosk/
 - [x] ENS resolution
 - [x] CLI testing tool
 - [x] PIN wallet system
+- [x] Arc Bridge Kit integration
+- [x] Cross-chain USDC settlement
+- [x] Multi-chain support (7 EVM chains)
+- [x] Fee collection (0.001%)
+- [x] Bridge failure fallback (PIN retry)
 - [ ] QR code scanner integration
 - [ ] NFC wristband support
 - [ ] Coin acceptor (Arduino)
@@ -288,11 +392,21 @@ We're not building for theoretical users. We're building for our neighbors.
 
 Part of **Ki0xk**, built for HackMoney.
 
-Demonstrates:
-- Real Yellow Network / Nitrolite integration
-- Off-chain instant transfers
-- Cash-to-crypto UX design
-- Physical-first infrastructure
+### Integrations
+
+| Sponsor | Integration | Purpose |
+|---------|-------------|---------|
+| **Yellow Network** | Nitrolite state channels | Off-chain accounting, instant transfers |
+| **Circle Arc** | Bridge Kit / CCTP | Cross-chain USDC settlement |
+| **ENS** | viem/ens resolution | Human-readable addresses |
+
+### Demonstrates
+
+- **Yellow Network**: Real Nitrolite integration for instant off-chain accounting
+- **Circle Arc**: Bridge Kit for cross-chain USDC delivery to user's chosen chain
+- **ENS**: Resolve human-readable names (vitalik.eth) to addresses
+- **Physical-first**: Cash economies need kiosks, not apps
+- **Two-layer architecture**: Fast accounting + reliable settlement
 
 ---
 
