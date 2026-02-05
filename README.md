@@ -34,9 +34,10 @@ Powered by [Yellow Network](https://yellow.org) for instant accounting and [Circ
 
 | Step | User Action | System Action |
 |------|-------------|---------------|
-| 1 | Insert cash | Value recorded |
-| 2 | Scan QR / Say ENS / Tap NFC | Destination identified |
-| 3 | Done | USDC transferred instantly |
+| 1 | Insert cash | Coins counted, value recorded to session |
+| 2 | Scan QR / Type ENS / Tap NFC | Destination wallet identified |
+| 3 | Select chain | User picks from 7 EVM networks |
+| 4 | Done | USDC bridged to destination via Arc CCTP |
 
 **No wallets to download. No seed phrases. No gas fees. No waiting.**
 
@@ -132,8 +133,8 @@ curl -XPOST https://clearnet-sandbox.yellow.com/faucet/requestTokens \
 npm run dev
 
 # Or use the CLI for testing
-npm run cli balance
-npm run cli send 0xDestination 0.01
+npm run cli balances
+npm run cli pin-create 0.01
 ```
 
 ---
@@ -210,7 +211,7 @@ npm run cli settle vitalik.eth arbitrum 0.05
 
 # Create a PIN wallet for first-timer
 npm run cli pin-create 5.00
-# 🎫 PIN: 847291 | Wallet ID: A3F2
+# 🎫 PIN: 847291 | Wallet ID: 3A9B0D
 
 # List supported chains
 npm run cli chains
@@ -219,6 +220,56 @@ npm run cli chains
 # arbitrum   → Arbitrum Sepolia (421614)
 # ...
 ```
+
+---
+
+## PIN Wallet System
+
+For users who don't have a crypto wallet yet. They insert cash, get a PIN receipt, and claim later from any device.
+
+### Format
+
+| Field | Format | Example |
+|-------|--------|---------|
+| **PIN** | 6 numeric digits (0-9) | `847291` |
+| **Wallet ID** | 6 alphanumeric chars (0-9 + A-D) | `3A9B0D` |
+
+Wallet ID charset (0-9, A-D) matches the 4x4 physical keypad on the kiosk hardware. PINs are hashed with SHA-256 before storage — they cannot be recovered.
+
+### Flow
+
+```
+Create:
+  1. Customer inserts cash
+  2. Kiosk generates PIN (6 digits) + Wallet ID (6 chars)
+  3. Prints receipt with PIN and Wallet ID
+  4. Funds stored in pin-wallets.json
+
+Claim:
+  1. Customer enters Wallet ID on kiosk keypad
+  2. Enters 6-digit PIN
+  3. Chooses destination (QR scan, ENS name, or NFC)
+  4. Selects chain (Base, Ethereum, Arbitrum, etc.)
+  5. Funds bridged via Arc CCTP to destination
+```
+
+### Bridge Failure Recovery
+
+If the cross-chain bridge fails (network issues, liquidity, etc.):
+
+```
+1. Settlement initiated
+2. Yellow accounting recorded ✓
+3. Arc bridge fails ✗
+4. System generates PIN: 847291 | Wallet ID: 3A9B0D
+5. Customer keeps receipt
+6. Later: npm run cli retry
+   OR customer returns with PIN
+7. Retry bridge with PIN
+8. Funds delivered successfully
+```
+
+No funds lost — just delayed. PIN system handles retries.
 
 ---
 
@@ -248,32 +299,13 @@ npm run cli chains
 
 ```
 1. Customer inserts cash
-2. Ki0xk generates 6-digit PIN
-3. Prints receipt: "PIN: 847291"
+2. Ki0xk generates 6-digit PIN + 6-char Wallet ID
+3. Prints receipt: "PIN: 847291 | Wallet ID: 3A9B0D"
 4. Later: download any wallet app
-5. Visit ki0xk.com, enter PIN
-6. Choose destination chain
+5. Return to kiosk or visit ki0xk.com
+6. Enter Wallet ID + PIN, choose destination chain
 7. Funds bridged to real wallet
 ```
-
-### Bridge Failure Recovery
-
-If the cross-chain bridge fails (network issues, liquidity, etc.):
-
-```
-1. Settlement initiated
-2. Yellow accounting recorded ✓
-3. Arc bridge fails ✗
-4. System generates PIN: 123456
-5. Customer keeps PIN
-6. Later: npm run cli retry
-   OR
-   Customer returns with PIN
-7. Retry bridge with PIN
-8. Funds delivered successfully
-```
-
-No funds lost — just delayed. PIN system handles retries.
 
 ---
 
@@ -360,14 +392,14 @@ kiosk/
 │   ├── cli.ts          # CLI testing tool
 │   ├── clearnode.ts    # Yellow Network client (channels, auth)
 │   ├── session.ts      # Session management (channel lifecycle)
-│   ├── settlement.ts   # Yellow + Arc orchestrator
+│   ├── settlement.ts   # Yellow + Arc orchestrator + PIN wallets
 │   ├── wallet.ts       # Viem wallet setup
-│   ├── config.ts       # Environment validation
-│   ├── logger.ts       # Structured logging
+│   ├── config.ts       # Environment validation (Zod)
+│   ├── logger.ts       # Structured logging (BigInt-safe)
 │   └── arc/
 │       ├── bridge.ts   # Arc Bridge Kit wrapper (CCTP)
 │       ├── chains.ts   # Supported chain configs + RPCs
-│       └── fees.ts     # Fee calculation
+│       └── fees.ts     # Fee calculation (0.001%)
 ├── docs/
 │   └── ARC_INTEGRATION_PLAN.md
 ├── .env.example
@@ -390,27 +422,42 @@ kiosk/
 
 ---
 
+## Frontend
+
+The kiosk tablet UI is in a separate repo: **[ki0xk-kiosk-ui](https://github.com/Ki0xk/ki0xk-kiosk-ui)**
+
+Built with Next.js 16, React 19, Tailwind CSS v4, and shadcn/ui. Features:
+- Coin slot simulator (matches Arduino Coinslot pulse mapping)
+- QR code camera scanner for destination wallets
+- On-screen QWERTY keyboard for ENS name input
+- Physical-style keypads for PIN (3x4) and Wallet ID (4x4)
+- Chain selector for 7 testnet destinations
+- Mock API layer shaped to match this backend's return types
+
+---
+
 ## Roadmap
 
 - [x] ClearNode connection and auth
 - [x] Unified balance transfers
 - [x] ENS resolution
 - [x] CLI testing tool
-- [x] PIN wallet system
+- [x] PIN wallet system (6-digit PIN + 6-char wallet ID)
 - [x] Arc Bridge Kit integration
 - [x] Cross-chain USDC settlement (CCTP)
 - [x] Multi-chain support (7 EVM chains)
 - [x] Fee collection (0.001%)
 - [x] Bridge failure fallback (PIN retry)
-- [x] **Yellow Network channel lifecycle** (create → use → close)
-- [x] **Session management** (session-start, session-deposit, session-end)
-- [x] **Transaction status tracking** (on-chain confirmation)
-- [x] **Explorer links** for all bridge transactions
-- [ ] QR code scanner integration
+- [x] Yellow Network channel lifecycle (create → use → close)
+- [x] Session management (session-start, session-deposit, session-end)
+- [x] Transaction status tracking (on-chain confirmation)
+- [x] Explorer links for all bridge transactions
+- [x] Touch screen UI ([ki0xk-kiosk-ui](https://github.com/Ki0xk/ki0xk-kiosk-ui))
+- [x] Coin acceptor simulation ([Coinslot](https://github.com/Ki0xk/ki0xk-kiosk-ui) Arduino firmware)
+- [x] QR code scanner (html5-qrcode in frontend)
+- [ ] HTTP/WebSocket API for frontend integration
 - [ ] NFC wristband support
-- [ ] Coin acceptor (Arduino)
 - [ ] Bill acceptor
-- [ ] Touch screen UI
 - [ ] Vendor terminal mode
 - [ ] Multi-kiosk dashboard
 
