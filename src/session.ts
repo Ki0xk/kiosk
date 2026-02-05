@@ -14,6 +14,7 @@ import { getClearNode } from "./clearnode.js";
 import { bridgeToChain } from "./arc/bridge.js";
 import { calculateFee, type FeeBreakdown } from "./arc/fees.js";
 import { getChainByKey } from "./arc/chains.js";
+import { createPinWallet } from "./settlement.js";
 import { logger } from "./logger.js";
 import { config } from "./config.js";
 import { kioskAddress } from "./wallet.js";
@@ -76,6 +77,14 @@ export interface SessionEndResult {
   fee: FeeBreakdown;
   bridgeTxHash?: string;
   destinationChain: string;
+  message: string;
+}
+
+export interface SessionPinResult {
+  success: boolean;
+  pin: string;
+  walletId: string;
+  amount: string;
   message: string;
 }
 
@@ -401,6 +410,109 @@ export async function endSession(
       destinationChain: chainInfo.name,
       message: `Settlement failed: ${errorMsg}`,
     };
+  }
+}
+
+/**
+ * Convert session to PIN wallet (user doesn't have wallet yet)
+ *
+ * This closes the Yellow channel and creates a PIN wallet.
+ * User can claim later with the PIN and choose their destination chain.
+ *
+ * Flow:
+ * 1. Close Yellow channel (funds return to kiosk)
+ * 2. Create PIN wallet with the session balance
+ * 3. User gets PIN to claim later
+ */
+export async function sessionToPin(sessionId: string): Promise<SessionPinResult> {
+  const sessions = loadSessions();
+  const session = sessions.find((s) => s.id === sessionId && s.status === "ACTIVE");
+
+  if (!session) {
+    throw new Error(`Session ${sessionId} not found or not active`);
+  }
+
+  const amount = parseFloat(session.currentBalance);
+  if (amount <= 0) {
+    throw new Error("No balance to convert to PIN");
+  }
+
+  logger.info("Converting session to PIN wallet", {
+    sessionId,
+    amount: session.currentBalance,
+  });
+
+  try {
+    // Step 1: Close the Yellow channel
+    if (session.channelId) {
+      const clearNode = getClearNode();
+
+      logger.info("Closing Yellow channel...", {
+        sessionId,
+        channelId: session.channelId,
+      });
+
+      await clearNode.closeChannel(
+        session.channelId,
+        kioskAddress // Return funds to kiosk unified balance
+      );
+
+      logger.info("Channel closed", { sessionId });
+    }
+
+    // Step 2: Create PIN wallet
+    const pinWallet = createPinWallet(session.currentBalance);
+
+    // Step 3: Mark session as settled (converted to PIN)
+    session.status = "SETTLED";
+    session.endedAt = Date.now();
+    saveSessions(sessions);
+
+    logger.info("Session converted to PIN wallet", {
+      sessionId,
+      pinWalletId: pinWallet.id,
+    });
+
+    return {
+      success: true,
+      pin: pinWallet.pin,
+      walletId: pinWallet.id,
+      amount: session.currentBalance,
+      message: `Session converted to PIN wallet. PIN: ${pinWallet.pin}`,
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    logger.error("Failed to convert session to PIN", { sessionId, error: errorMsg });
+
+    // Still try to create PIN wallet even if channel close failed
+    try {
+      const pinWallet = createPinWallet(session.currentBalance);
+      session.status = "SETTLED";
+      session.error = `Channel close failed but PIN created: ${errorMsg}`;
+      session.endedAt = Date.now();
+      saveSessions(sessions);
+
+      return {
+        success: true,
+        pin: pinWallet.pin,
+        walletId: pinWallet.id,
+        amount: session.currentBalance,
+        message: `PIN created (channel close had issues): ${pinWallet.pin}`,
+      };
+    } catch (pinError) {
+      session.status = "FAILED";
+      session.error = errorMsg;
+      session.endedAt = Date.now();
+      saveSessions(sessions);
+
+      return {
+        success: false,
+        pin: "",
+        walletId: "",
+        amount: session.currentBalance,
+        message: `Failed to create PIN: ${errorMsg}`,
+      };
+    }
   }
 }
 

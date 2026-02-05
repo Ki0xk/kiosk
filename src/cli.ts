@@ -34,6 +34,7 @@ import {
   startSession,
   depositToSession,
   endSession,
+  sessionToPin,
   getSession,
   getActiveSessions,
   getAllSessions,
@@ -456,6 +457,48 @@ async function cmdSessionEnd(args: string[]): Promise<void> {
   }
 }
 
+async function cmdSessionPin(args: string[]): Promise<void> {
+  const sessionId = args[0] || (await prompt("Session ID: "));
+
+  const session = getSession(sessionId);
+  if (!session) {
+    console.log("\n❌ Session not found");
+    return;
+  }
+
+  if (session.status !== "ACTIVE") {
+    console.log(`\n❌ Session is not active (status: ${session.status})`);
+    return;
+  }
+
+  console.log(`\n🎫 Converting session ${sessionId} to PIN wallet...`);
+  console.log(`   Balance: ${session.currentBalance} USDC`);
+
+  const confirm = await prompt("\nGenerate PIN instead of settling now? (y/n): ");
+  if (confirm.toLowerCase() !== "y") {
+    console.log("Cancelled.");
+    return;
+  }
+
+  console.log("\n⏳ Closing channel and generating PIN...");
+
+  const result = await sessionToPin(sessionId);
+
+  if (result.success) {
+    console.log("\n" + "═".repeat(50));
+    console.log("🎫 PIN WALLET CREATED");
+    console.log("═".repeat(50));
+    console.log(`\n   Wallet ID: ${result.walletId}`);
+    console.log(`   PIN:       ${result.pin}`);
+    console.log(`   Amount:    ${result.amount} USDC`);
+    console.log("\n   ⚠️  SAVE THIS PIN - it cannot be recovered!");
+    console.log("\n   To claim later: npm run cli pin-claim");
+    console.log("═".repeat(50));
+  } else {
+    console.log("\n❌ " + result.message);
+  }
+}
+
 async function cmdSessionStatus(args: string[]): Promise<void> {
   const sessionId = args[0];
 
@@ -640,6 +683,10 @@ async function main() {
         await cmdSessionEnd(cmdArgs);
         break;
 
+      case "session-pin":
+        await cmdSessionPin(cmdArgs);
+        break;
+
       case "session-status":
       case "session":
         await cmdSessionStatus(cmdArgs);
@@ -662,6 +709,7 @@ Sessions (Yellow Network Channels):
   session-start [user]           Start new session (opens channel)
   session-deposit <id> [amt]     Add funds (off-chain state update)
   session-end <id> <dest> [chain] End session (close channel + bridge)
+  session-pin <id>               End session with PIN (no wallet needed)
   session-status [id]            Show session status
   sessions                       List all sessions
 
@@ -681,11 +729,18 @@ PIN Wallets:
 Testing:
   test                 Run full test flow
 
-Session Flow Example:
-  npm run cli session-start vitalik.eth   # Open channel
-  npm run cli session-deposit S1234 5.00  # User inserts $5 cash
-  npm run cli session-deposit S1234 2.50  # User inserts more cash
+Session Flow Examples:
+  # User WITH wallet:
+  npm run cli session-start              # Open channel
+  npm run cli session-deposit S1234 5.00 # User inserts $5 cash
+  npm run cli session-deposit S1234 2.50 # User inserts more cash
   npm run cli session-end S1234 0x... base # Close + bridge to Base
+
+  # User WITHOUT wallet (first-timer):
+  npm run cli session-start              # Open channel
+  npm run cli session-deposit S1234 10.00 # User inserts cash
+  npm run cli session-pin S1234          # Get PIN, settle later
+  # Later: npm run cli pin-claim         # User returns with wallet
 
 Examples:
   npm run cli balances
