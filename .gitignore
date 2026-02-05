@@ -33,8 +33,9 @@ data/
 .claude/
 CLAUDE.md
 
-# PIN wallet local storage (contains sensitive data)
+# Local storage (runtime data)
 pin-wallets.json
+sessions.json
 
 # Large documentation files (fetch fresh)
 llms-full.txt
