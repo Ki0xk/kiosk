@@ -65,10 +65,10 @@ export class ClearNodeClient {
     // Only handle push messages (ones without request correlation)
     switch (message.method) {
       case RPCMethod.BalanceUpdate:
-        logger.info("Balance update (push)", { params: message.params });
+        logger.debug("Balance update (push)");
         break;
       case RPCMethod.ChannelsUpdate:
-        logger.info("Channels update (push)", { params: message.params });
+        logger.debug("Channels update (push)");
         break;
       case RPCMethod.Error:
         logger.error("ClearNode error (push)", { params: message.params });
@@ -82,7 +82,6 @@ export class ClearNodeClient {
     const response = await this.client.sendMessage(JSON.parse(message));
     this.networkConfig = response;
     logger.info("Config received");
-    logger.debug("Config details", { response });
     return response;
   }
 
@@ -116,9 +115,7 @@ export class ClearNodeClient {
       authParams,
       this.nextRequestId()
     );
-    logger.debug("Sending auth request...");
     const challengeResponse = await this.client.sendMessage(JSON.parse(authRequestMsg));
-    logger.debug("Challenge response received", { challengeResponse });
 
     // Extract challenge message from response
     // Response format: { method, requestId, params: { challengeMessage } }
@@ -132,7 +129,6 @@ export class ClearNodeClient {
       throw new Error("Auth challenge not received");
     }
 
-    logger.debug("Challenge received, signing with main wallet...");
 
     // Step 2: Create EIP-712 signer and sign challenge with MAIN wallet
     const eip712Signer = createEIP712AuthMessageSigner(
@@ -149,7 +145,6 @@ export class ClearNodeClient {
 
     // Step 3: Send verification
     const verifyResponse = await this.client.sendMessage(JSON.parse(authVerifyMsg));
-    logger.debug("Verify response", { verifyResponse });
 
     // Check for auth error
     const verifyData = verifyResponse as any;
@@ -180,15 +175,31 @@ export class ClearNodeClient {
   }
 
   async getChannels(): Promise<unknown> {
-    logger.info("Fetching channels...");
+    logger.debug("Fetching channels...");
     const message = createGetChannelsMessageV2(
       kioskAddress,
       undefined,
       this.nextRequestId()
     );
     const response = await this.client.sendMessage(JSON.parse(message));
-    logger.info("Channels", { response });
+    logger.debug("Channels response received");
     return response;
+  }
+
+  /**
+   * Check if a specific channel exists and is open/resizing
+   */
+  async channelExists(channelId: string): Promise<boolean> {
+    try {
+      const channels = await this.getChannels();
+      const channelList = (channels as any)?.params?.channels || [];
+      return channelList.some((ch: any) =>
+        (ch.channelId === channelId || ch.channel_id === channelId) &&
+        (ch.status === "open" || ch.status === "resizing" || ch.status === "ACTIVE")
+      );
+    } catch {
+      return false;
+    }
   }
 
   async createChannel(tokenAddress: string, chainId: number = 84532): Promise<string> {
@@ -196,7 +207,7 @@ export class ClearNodeClient {
       throw new Error("Not authenticated");
     }
 
-    logger.info("Creating channel...", { tokenAddress, chainId });
+    logger.debug("Creating channel...", { chainId });
 
     const message = await createCreateChannelMessage(
       sessionSigner,
@@ -207,12 +218,9 @@ export class ClearNodeClient {
       this.nextRequestId()
     );
 
-    logger.debug("Raw channel message", { message });
-
     // Send the raw JSON string directly to avoid BigInt serialization issues
-    // yellow-ts sendMessage will handle it as-is when it's already a string
     const response = await this.client.sendMessage(message);
-    logger.info("Channel creation response", { response });
+    logger.debug("Channel created");
 
     const responseData = response as any;
     if (responseData?.method === "error" || responseData?.params?.error) {
@@ -264,7 +272,7 @@ export class ClearNodeClient {
       throw new Error("Not authenticated");
     }
 
-    logger.info("Closing channel...", { channelId, fundsDestination });
+    logger.debug("Sending close channel request...");
 
     const message = await createCloseChannelMessage(
       sessionSigner,
@@ -274,7 +282,7 @@ export class ClearNodeClient {
     );
 
     const response = await this.client.sendMessage(message);
-    logger.info("Close channel response", { response });
+    logger.debug("Close channel response received");
 
     const responseData = response as any;
     if (responseData?.method === "error" || responseData?.params?.error) {

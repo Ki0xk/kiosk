@@ -214,17 +214,21 @@ export async function settleToChain(
       feeRecipient
     );
 
-    // Step 5: Close Yellow channel (best effort - may already be closed)
+    // Step 5: Close Yellow channel (best effort)
     if (channelId) {
-      try {
-        logger.info("Closing Yellow channel...");
-        await clearNode.closeChannel(channelId, kioskAddress);
-        logger.info("Channel closed");
-      } catch (closeError) {
-        // Channel may have auto-closed or expired - this is OK if bridge succeeded
-        logger.warn("Channel close failed (may have auto-closed)", {
-          error: closeError instanceof Error ? closeError.message : closeError
-        });
+      const exists = await clearNode.channelExists(channelId);
+      if (exists) {
+        try {
+          logger.info("Closing Yellow channel...");
+          await clearNode.closeChannel(channelId, kioskAddress);
+          logger.info("Channel closed");
+        } catch (closeError) {
+          logger.debug("Channel close failed", {
+            reason: closeError instanceof Error ? closeError.message : "unknown"
+          });
+        }
+      } else {
+        logger.info("Channel auto-closed (zero-balance)");
       }
     }
 
@@ -451,11 +455,22 @@ export async function claimPinWallet(
       feeRecipient
     );
 
-    // Step 4: Close channel
+    // Step 4: Close channel (best effort)
     if (channelId) {
-      logger.info("Closing Yellow channel...");
-      await clearNode.closeChannel(channelId, kioskAddress);
-      logger.info("Channel closed");
+      const exists = await clearNode.channelExists(channelId);
+      if (exists) {
+        try {
+          logger.info("Closing Yellow channel...");
+          await clearNode.closeChannel(channelId, kioskAddress);
+          logger.info("Channel closed");
+        } catch (closeError) {
+          logger.debug("Channel close failed", {
+            reason: closeError instanceof Error ? closeError.message : "unknown"
+          });
+        }
+      } else {
+        logger.info("Channel auto-closed (zero-balance)");
+      }
     }
 
     if (bridgeResult.success) {

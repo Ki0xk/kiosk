@@ -9,6 +9,7 @@ export interface ChainInfo {
   chainId: number;
   isTestnet: boolean;
   explorerUrl: string;
+  rpcUrl: string;
 }
 
 export const SUPPORTED_CHAINS: Record<string, ChainInfo> = {
@@ -18,6 +19,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainInfo> = {
     chainId: 0, // TBD - Arc testnet chain ID
     isTestnet: true,
     explorerUrl: "https://explorer.arc.network",
+    rpcUrl: "https://rpc-testnet.arc.network",
   },
   base: {
     name: "Base Sepolia",
@@ -25,6 +27,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainInfo> = {
     chainId: 84532,
     isTestnet: true,
     explorerUrl: "https://sepolia.basescan.org",
+    rpcUrl: "https://sepolia.base.org",
   },
   ethereum: {
     name: "Ethereum Sepolia",
@@ -32,6 +35,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainInfo> = {
     chainId: 11155111,
     isTestnet: true,
     explorerUrl: "https://sepolia.etherscan.io",
+    rpcUrl: "https://rpc.sepolia.org",
   },
   arbitrum: {
     name: "Arbitrum Sepolia",
@@ -39,6 +43,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainInfo> = {
     chainId: 421614,
     isTestnet: true,
     explorerUrl: "https://sepolia.arbiscan.io",
+    rpcUrl: "https://sepolia-rollup.arbitrum.io/rpc",
   },
   polygon: {
     name: "Polygon Amoy",
@@ -46,6 +51,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainInfo> = {
     chainId: 80002,
     isTestnet: true,
     explorerUrl: "https://amoy.polygonscan.com",
+    rpcUrl: "https://rpc-amoy.polygon.technology",
   },
   optimism: {
     name: "Optimism Sepolia",
@@ -53,6 +59,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainInfo> = {
     chainId: 11155420,
     isTestnet: true,
     explorerUrl: "https://sepolia-optimism.etherscan.io",
+    rpcUrl: "https://sepolia.optimism.io",
   },
   avalanche: {
     name: "Avalanche Fuji",
@@ -60,6 +67,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainInfo> = {
     chainId: 43113,
     isTestnet: true,
     explorerUrl: "https://testnet.snowtrace.io",
+    rpcUrl: "https://api.avax-test.network/ext/bc/C/rpc",
   },
   linea: {
     name: "Linea Sepolia",
@@ -67,6 +75,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainInfo> = {
     chainId: 59141,
     isTestnet: true,
     explorerUrl: "https://sepolia.lineascan.build",
+    rpcUrl: "https://rpc.sepolia.linea.build",
   },
 };
 

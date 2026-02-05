@@ -202,7 +202,12 @@ async function cmdSettle(args: string[]): Promise<void> {
   if (result.success) {
     console.log("\n✅ " + result.message);
     if (result.bridgeResult?.txHash) {
-      console.log(`📜 Bridge TX: ${result.bridgeResult.txHash}`);
+      const status = result.bridgeResult.txStatus === "success" ? "✓ confirmed" :
+                     result.bridgeResult.txStatus === "reverted" ? "✗ reverted" : "⏳ pending";
+      console.log(`📜 TX: ${result.bridgeResult.txHash.slice(0, 20)}... [${status}]`);
+      if (result.bridgeResult.explorerUrl) {
+        console.log(`🔗 ${result.bridgeResult.explorerUrl}`);
+      }
     }
   } else {
     console.log("\n⚠️ " + result.message);
@@ -246,8 +251,14 @@ async function cmdBridge(args: string[]): Promise<void> {
 
   if (result.success) {
     console.log("\n✅ Bridge successful!");
-    console.log(`📜 TX Hash: ${result.txHash}`);
-    console.log(`🔗 Explorer: ${chainInfo.explorerUrl}/tx/${result.txHash}`);
+    if (result.txHash) {
+      const status = result.txStatus === "success" ? "✓ confirmed" :
+                     result.txStatus === "reverted" ? "✗ reverted" : "⏳ pending";
+      console.log(`📜 TX: ${result.txHash.slice(0, 20)}... [${status}]`);
+    }
+    if (result.explorerUrl) {
+      console.log(`🔗 ${result.explorerUrl}`);
+    }
   } else {
     console.log("\n❌ Bridge failed: " + result.error);
   }

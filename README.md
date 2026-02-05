@@ -46,11 +46,20 @@ Powered by [Yellow Network](https://yellow.org) for instant accounting and [Circ
 
 Ki0xk uses a **two-layer architecture** for maximum flexibility:
 
-### Layer 1: Yellow Network (Accounting)
+### Layer 1: Yellow Network (State Channels)
+- **Session-based channels** — open channel → off-chain operations → close channel
 - **Instant off-chain transfers** using ytest.usd
 - **No gas fees** for internal operations
 - **Real-time balance tracking** for kiosk operations
 - Perfect for high-frequency micro-transactions
+
+```
+Session Lifecycle:
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Channel   │ ──▶ │  Off-chain  │ ──▶ │   Channel   │
+│    Open     │     │  Operations │     │    Close    │
+└─────────────┘     └─────────────┘     └─────────────┘
+```
 
 ### Layer 2: Arc Bridge (Settlement)
 - **Real USDC delivery** to user's preferred chain
@@ -138,9 +147,17 @@ npm run cli <command>
 balances             Show Yellow + Arc balances
 chains               List supported destination chains
 
-# Settlement (Yellow + Arc)
-settle <dest> [chain] [amt]   Full settlement flow
+# Settlement (Yellow Channel + Arc Bridge)
+settle <dest> [chain] [amt]   Full settlement flow with channel lifecycle
 bridge <dest> [chain] [amt]   Direct Arc bridge only
+
+# Session Management (Yellow Network Channels)
+session-start [user]          Start new session (opens Yellow channel)
+session-deposit <id> <amt>    Add funds to session (off-chain)
+session-end <id> <dest> [chain]   End session and settle to chain
+session-pin <id>              Convert session to PIN wallet
+session-status <id>           View session details
+sessions                      List all sessions
 
 # ENS
 resolve <name>       Resolve ENS or validate address
@@ -167,15 +184,29 @@ npm run cli balances
 # ║  Arc (Liquidity):            5.00 USDC               ║
 # ╚═══════════════════════════════════════════════════════╝
 
-# Settle to Base (full flow)
+# Settle to Base (full Yellow channel + Arc bridge flow)
 npm run cli settle 0x843914e5BBdbE92296F2c3D895D424301b3517fC base 0.01
-# ✅ Settlement complete! 0.00999999 USDC sent to Base Sepolia
+# [INFO] Opening Yellow channel...
+# [INFO] Channel opened {"channelId":"0xcf2c..."}
+# [INFO] Bridge steps {"flow":"approve:success → burn:success → fetchAttestation:success → mint:success"}
+# [INFO] Bridge complete! {"txHash":"0x9825...","status":"success"}
+# [INFO] Channel auto-closed (zero-balance)
+# ✅ Settlement complete! 0.01 USDC sent to Base Sepolia
+# 📜 TX: 0x9825c894777527... [✓ confirmed]
+# 🔗 https://sepolia.basescan.org/tx/0x9825c8947775277333...
+
+# Session-based flow (for kiosk operations)
+npm run cli session-start user123
+# ✅ Session S1A2B3C4 started. Channel: 0x...
+
+npm run cli session-deposit S1A2B3C4 5.00
+# ✅ Deposited 5.00 USDC. Session balance: 5.00
+
+npm run cli session-end S1A2B3C4 0x843914e5BBdbE92296F2c3D895D424301b3517fC base
+# ✅ Session settled! 5.00 USDC sent to Base Sepolia
 
 # Settle to ENS name on Arbitrum
 npm run cli settle vitalik.eth arbitrum 0.05
-
-# Direct bridge (skip Yellow accounting)
-npm run cli bridge 0x843914e5BBdbE92296F2c3D895D424301b3517fC polygon 0.01
 
 # Create a PIN wallet for first-timer
 npm run cli pin-create 5.00
@@ -327,14 +358,15 @@ kiosk/
 ├── src/
 │   ├── index.ts        # Kiosk daemon entry point
 │   ├── cli.ts          # CLI testing tool
-│   ├── clearnode.ts    # Yellow Network client
+│   ├── clearnode.ts    # Yellow Network client (channels, auth)
+│   ├── session.ts      # Session management (channel lifecycle)
 │   ├── settlement.ts   # Yellow + Arc orchestrator
 │   ├── wallet.ts       # Viem wallet setup
 │   ├── config.ts       # Environment validation
 │   ├── logger.ts       # Structured logging
 │   └── arc/
-│       ├── bridge.ts   # Arc Bridge Kit wrapper
-│       ├── chains.ts   # Supported chain configs
+│       ├── bridge.ts   # Arc Bridge Kit wrapper (CCTP)
+│       ├── chains.ts   # Supported chain configs + RPCs
 │       └── fees.ts     # Fee calculation
 ├── docs/
 │   └── ARC_INTEGRATION_PLAN.md
@@ -366,10 +398,14 @@ kiosk/
 - [x] CLI testing tool
 - [x] PIN wallet system
 - [x] Arc Bridge Kit integration
-- [x] Cross-chain USDC settlement
+- [x] Cross-chain USDC settlement (CCTP)
 - [x] Multi-chain support (7 EVM chains)
 - [x] Fee collection (0.001%)
 - [x] Bridge failure fallback (PIN retry)
+- [x] **Yellow Network channel lifecycle** (create → use → close)
+- [x] **Session management** (session-start, session-deposit, session-end)
+- [x] **Transaction status tracking** (on-chain confirmation)
+- [x] **Explorer links** for all bridge transactions
 - [ ] QR code scanner integration
 - [ ] NFC wristband support
 - [ ] Coin acceptor (Arduino)
@@ -402,11 +438,12 @@ Part of **Ki0xk**, built for HackMoney.
 
 ### Demonstrates
 
-- **Yellow Network**: Real Nitrolite integration for instant off-chain accounting
-- **Circle Arc**: Bridge Kit for cross-chain USDC delivery to user's chosen chain
+- **Yellow Network**: Full Nitrolite channel lifecycle (create → operate → close)
+- **Circle Arc**: Bridge Kit + CCTP for cross-chain USDC with tx confirmation
 - **ENS**: Resolve human-readable names (vitalik.eth) to addresses
 - **Physical-first**: Cash economies need kiosks, not apps
-- **Two-layer architecture**: Fast accounting + reliable settlement
+- **Two-layer architecture**: Fast state channels + reliable cross-chain settlement
+- **Session management**: Real kiosk workflow with channel-wrapped operations
 
 ---
 

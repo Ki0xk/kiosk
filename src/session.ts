@@ -136,15 +136,11 @@ export async function startSession(userIdentifier?: string): Promise<SessionStar
     }
 
     // Create a channel for this session
-    // This is the key Yellow Network integration - session-based channels
-    logger.info("Creating Yellow channel for session...", { sessionId });
-
     const channelId = await clearNode.createChannel(
       YTEST_USD_TOKEN,
       BASE_SEPOLIA_CHAIN_ID
     );
-
-    logger.info("Channel created", { sessionId, channelId });
+    logger.info("Yellow channel created", { channelId: channelId?.slice(0, 20) + "..." });
 
     // Create session record
     const session: KioskSession = {
@@ -345,17 +341,15 @@ export async function endSession(
         await clearNode.authenticate();
       }
 
-      logger.info("Closing Yellow channel...", {
-        sessionId,
-        channelId: session.channelId
-      });
-
-      await clearNode.closeChannel(
-        session.channelId,
-        kioskAddress // Return funds to kiosk for bridging
-      );
-
-      logger.info("Channel closed", { sessionId });
+      // Check if channel still exists before closing
+      const exists = await clearNode.channelExists(session.channelId);
+      if (exists) {
+        logger.info("Closing Yellow channel...");
+        await clearNode.closeChannel(session.channelId, kioskAddress);
+        logger.info("Channel closed");
+      } else {
+        logger.info("Channel auto-closed (zero-balance)");
+      }
     }
 
     // Step 2: Bridge real USDC via Arc to user's chain
@@ -468,17 +462,15 @@ export async function sessionToPin(sessionId: string): Promise<SessionPinResult>
         await clearNode.authenticate();
       }
 
-      logger.info("Closing Yellow channel...", {
-        sessionId,
-        channelId: session.channelId,
-      });
-
-      await clearNode.closeChannel(
-        session.channelId,
-        kioskAddress // Return funds to kiosk unified balance
-      );
-
-      logger.info("Channel closed", { sessionId });
+      // Check if channel still exists before closing
+      const exists = await clearNode.channelExists(session.channelId);
+      if (exists) {
+        logger.info("Closing Yellow channel...");
+        await clearNode.closeChannel(session.channelId, kioskAddress);
+        logger.info("Channel closed");
+      } else {
+        logger.info("Channel auto-closed (zero-balance)");
+      }
     }
 
     // Step 2: Create PIN wallet
