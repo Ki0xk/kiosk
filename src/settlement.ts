@@ -15,8 +15,13 @@ import { calculateFee, formatFeeBreakdown, type FeeBreakdown } from "./arc/fees.
 import { SUPPORTED_CHAINS, getChainByKey } from "./arc/chains.js";
 import { logger } from "./logger.js";
 import { config } from "./config.js";
+import { kioskAddress } from "./wallet.js";
 import * as crypto from "crypto";
 import * as fs from "fs";
+
+// Yellow sandbox ytest.usd token
+const YTEST_USD_TOKEN = "0xDB9F293e3898c9E5536A3be1b0C56c89d2b32DEb";
+const BASE_SEPOLIA_CHAIN_ID = 84532;
 
 // PIN wallet storage
 const PIN_WALLET_FILE = "./pin-wallets.json";
@@ -317,6 +322,13 @@ export function createPinWallet(amount: string): PinWallet & { pin: string } {
 
 /**
  * Claim PIN wallet - verify PIN and settle to chain
+ *
+ * Uses Yellow Network channel as settlement wrapper:
+ * 1. Verify PIN
+ * 2. Open channel (Yellow Network)
+ * 3. Bridge via Arc
+ * 4. Close channel
+ * 5. If bridge fails, PIN still valid for retry
  */
 export async function claimPinWallet(
   walletId: string,
@@ -338,27 +350,110 @@ export async function claimPinWallet(
     throw new Error("Invalid PIN");
   }
 
+  const chainInfo = getChainByKey(targetChainKey);
+  if (!chainInfo) {
+    throw new Error(`Unsupported chain: ${targetChainKey}`);
+  }
+
   // Update wallet with destination info
   wallet.destination = destination;
   wallet.targetChain = targetChainKey;
-
-  // Attempt settlement
-  const result = await settleToChain(destination, targetChainKey, wallet.amount);
-
-  if (result.success) {
-    wallet.status = "SETTLED";
-    wallet.bridgeTxHash = result.bridgeResult?.txHash;
-    wallet.settledAt = Date.now();
-  } else {
-    wallet.status = "PENDING_BRIDGE";
-    wallet.bridgeAttempts++;
-    wallet.lastBridgeError = result.bridgeResult?.error;
-    wallet.lastBridgeAttempt = Date.now();
-  }
-
   savePinWallets(wallets);
 
-  return result;
+  const feeBreakdown = calculateFee(parseFloat(wallet.amount));
+
+  logger.info("Claiming PIN wallet with channel settlement", {
+    walletId,
+    destination,
+    chain: chainInfo.name,
+    amount: wallet.amount,
+  });
+
+  let channelId: string | null = null;
+
+  try {
+    // Step 1: Connect and authenticate
+    const clearNode = getClearNode();
+    if (!clearNode.isAuthenticated) {
+      await clearNode.connect();
+      await clearNode.getConfig();
+      await clearNode.authenticate();
+    }
+
+    // Step 2: Open channel (Yellow Network integration)
+    logger.info("Opening Yellow channel for settlement...");
+    channelId = await clearNode.createChannel(YTEST_USD_TOKEN, BASE_SEPOLIA_CHAIN_ID);
+    logger.info("Channel opened", { channelId });
+
+    // Step 3: Bridge via Arc
+    logger.info("Bridging via Arc...", { destination, chain: chainInfo.name });
+    const feeRecipient = config.FEE_RECIPIENT_ADDRESS || undefined;
+    const bridgeResult = await bridgeToChain(
+      destination,
+      targetChainKey,
+      wallet.amount,
+      feeRecipient
+    );
+
+    // Step 4: Close channel
+    if (channelId) {
+      logger.info("Closing Yellow channel...");
+      await clearNode.closeChannel(channelId, kioskAddress);
+      logger.info("Channel closed");
+    }
+
+    if (bridgeResult.success) {
+      wallet.status = "SETTLED";
+      wallet.bridgeTxHash = bridgeResult.txHash;
+      wallet.settledAt = Date.now();
+      savePinWallets(wallets);
+
+      return {
+        success: true,
+        yellowRecorded: true,
+        bridgeResult,
+        message: `Settlement complete! ${feeBreakdown.netAmount} USDC sent to ${chainInfo.name}`,
+      };
+    } else {
+      wallet.status = "PENDING_BRIDGE";
+      wallet.bridgeAttempts++;
+      wallet.lastBridgeError = bridgeResult.error;
+      wallet.lastBridgeAttempt = Date.now();
+      savePinWallets(wallets);
+
+      return {
+        success: false,
+        yellowRecorded: true,
+        bridgeResult,
+        message: `Bridge failed: ${bridgeResult.error}. PIN still valid for retry.`,
+      };
+    }
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    logger.error("Settlement failed", { walletId, error: errorMsg });
+
+    // Try to close channel if it was opened
+    if (channelId) {
+      try {
+        const clearNode = getClearNode();
+        await clearNode.closeChannel(channelId, kioskAddress);
+      } catch {
+        // Ignore close errors
+      }
+    }
+
+    wallet.status = "PENDING_BRIDGE";
+    wallet.bridgeAttempts++;
+    wallet.lastBridgeError = errorMsg;
+    wallet.lastBridgeAttempt = Date.now();
+    savePinWallets(wallets);
+
+    return {
+      success: false,
+      yellowRecorded: false,
+      message: `Settlement failed: ${errorMsg}. PIN still valid for retry.`,
+    };
+  }
 }
 
 /**
