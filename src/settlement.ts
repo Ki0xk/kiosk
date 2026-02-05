@@ -299,11 +299,19 @@ function hashPin(pin: string): string {
 }
 
 function generatePin(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return crypto.randomInt(100000, 1000000).toString();
 }
 
+// Wallet ID: 6 chars from 0-9 + A-D (matches frontend 4x4 physical keypad)
+const WALLET_ID_CHARS = "0123456789ABCD";
+const WALLET_ID_LENGTH = 6;
+
 function generateWalletId(): string {
-  return crypto.randomBytes(4).toString("hex").toUpperCase();
+  let result = "";
+  for (let i = 0; i < WALLET_ID_LENGTH; i++) {
+    result += WALLET_ID_CHARS[crypto.randomInt(WALLET_ID_CHARS.length)];
+  }
+  return result;
 }
 
 export function loadPinWallets(): PinWallet[] {
